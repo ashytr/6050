@@ -1,0 +1,6 @@
+// ================= 配置区域 =================
+#define WIFI_SSID       "Xiaomi 15"
+#define WIFI_PASSWORD   "00000000"
+#define SERVER_IP       "47.108.159.151"
+#define SERVER_PORT     3000
+// =============================================

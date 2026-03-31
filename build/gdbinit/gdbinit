@@ -1,0 +1,2 @@
+source D:/MCUProjects/ESP32Projects/6050/build/gdbinit/symbols
+source D:/MCUProjects/ESP32Projects/6050/build/gdbinit/connect
