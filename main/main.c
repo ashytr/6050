@@ -276,7 +276,7 @@ void app_main(void){
     xTaskCreate(attitude_log_task, "att_log", 3072, NULL, 4, NULL);
     // 创建数据传输任务
     xTaskCreate(data_transmission_task, "data_task", 4096, NULL, 5, NULL);
-    // ★ 创建延迟测量任务
+    // 创建延迟测量任务
     xTaskCreate(latency_task, "lat_task", 3072, NULL, 4, NULL);
 
     ESP_LOGI(TAG, "System initialized, main task ended.");
