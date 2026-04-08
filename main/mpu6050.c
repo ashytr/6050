@@ -436,7 +436,7 @@ void mpu6050_get_angle_plus(MPU6050_t *data)
 {
     static float q0 = 1.0f, q1 = 0.0f, q2 = 0.0f, q3 = 0.0f;
     static float integral_x = 0.0f, integral_y = 0.0f, integral_z = 0.0f;
-    static uint16_t init_cnt = 0;
+    static uint16_t init_cnt = 0; 
     static float prev_yaw = 0.0f;
     static float yaw_unwrapped = 0.0f;
     static bool first_yaw = true;

@@ -32,10 +32,57 @@ static esp_websocket_client_handle_t websocket_client;
 #define SOLVER_HZ               SAMPLE_RATE_HZ
 #define TX_HZ                   20
 
+// ==================== 原始数据 UART 输出（用于 Python 离线/在线解算对比） ====================
+// 为保证“不影响原来的代码逻辑”，默认关闭；需要时把 0 改为 1。
+#define ENABLE_RAW_UART_STREAM  1
+// 建议不要超过串口带宽；115200 下 100Hz 更稳，必要时可提高串口波特率再改到 200Hz。
+#define RAW_UART_STREAM_HZ      100
+// 输出格式：RAW,t_ms,ax,ay,az,gx,gy,gz（均为 int16 原始值；gyro 已减零偏）
+// 可选附带当前 ESP32 内部解算欧拉角（单位：deg），便于对照。
+#define RAW_UART_INCLUDE_EULER  1
+
 // 全局保存最近一次测得的 ESP->Server 单向延迟 (ms)
 static uint32_t g_ms_one_way = 0;
 static MPU6050_t g_mpu_data;
 static portMUX_TYPE g_mpu_lock = portMUX_INITIALIZER_UNLOCKED;
+
+#if ENABLE_RAW_UART_STREAM
+static void raw_uart_stream_task(void *pvParameters){
+    (void)pvParameters;
+
+    TickType_t last_wake = xTaskGetTickCount();
+    TickType_t interval = pdMS_TO_TICKS(1000 / RAW_UART_STREAM_HZ);
+    if (interval == 0) {
+        interval = 1;
+    }
+
+    MPU6050_t mpu_snapshot;
+
+    while (1) {
+        taskENTER_CRITICAL(&g_mpu_lock);
+        mpu_snapshot = g_mpu_data;
+        taskEXIT_CRITICAL(&g_mpu_lock);
+
+        uint32_t t_ms = (uint32_t)(xTaskGetTickCount() * portTICK_PERIOD_MS);
+
+#if RAW_UART_INCLUDE_EULER
+        // 用 printf 输出，避免 ESP_LOG 前缀干扰 Python 解析
+        printf("RAW,%lu,%d,%d,%d,%d,%d,%d,%.2f,%.2f,%.2f\n",
+               (unsigned long)t_ms,
+               (int)mpu_snapshot.AccX, (int)mpu_snapshot.AccY, (int)mpu_snapshot.AccZ,
+               (int)mpu_snapshot.GyroX, (int)mpu_snapshot.GyroY, (int)mpu_snapshot.GyroZ,
+               mpu_snapshot.roll, mpu_snapshot.pitch, mpu_snapshot.yaw);
+#else
+        printf("RAW,%lu,%d,%d,%d,%d,%d,%d\n",
+               (unsigned long)t_ms,
+               (int)mpu_snapshot.AccX, (int)mpu_snapshot.AccY, (int)mpu_snapshot.AccZ,
+               (int)mpu_snapshot.GyroX, (int)mpu_snapshot.GyroY, (int)mpu_snapshot.GyroZ);
+#endif
+
+        vTaskDelayUntil(&last_wake, interval);
+    }
+}
+#endif
 
 // ==================== WiFi 事件处理 ====================
 static void wifi_event_handler(void *arg, esp_event_base_t event_base,
@@ -272,8 +319,14 @@ void app_main(void){
 
     // 先启动 200Hz 姿态解算，再按 20Hz 发送
     xTaskCreate(attitude_solver_task, "solver_task", 4096, NULL, 6, NULL);
+
+#if ENABLE_RAW_UART_STREAM
+    // 原始数据输出（供 Python 接收/对比算法），不影响原有 WebSocket 逻辑
+    xTaskCreate(raw_uart_stream_task, "raw_uart", 3072, NULL, 3, NULL);
+#endif
+
     // 姿态日志输出（含自适应漂移估计）
-    xTaskCreate(attitude_log_task, "att_log", 3072, NULL, 4, NULL);
+    //xTaskCreate(attitude_log_task, "att_log", 3072, NULL, 4, NULL);
     // 创建数据传输任务
     xTaskCreate(data_transmission_task, "data_task", 4096, NULL, 5, NULL);
     // 创建延迟测量任务

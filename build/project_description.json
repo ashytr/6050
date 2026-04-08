@@ -1,7 +1,7 @@
 {
     "version":            "1.2",
     "project_name":       "6050",
-    "project_version":    "ca8feba-dirty",
+    "project_version":    "5609908-dirty",
     "project_path":       "D:/MCUProjects/ESP32Projects/6050",
     "idf_path":           "D:/ProgramFiles/espidf/v5.4.3/esp-idf",
     "build_dir":          "D:/MCUProjects/ESP32Projects/6050/build",
