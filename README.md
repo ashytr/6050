@@ -76,8 +76,7 @@ pip install pyserial numpy matplotlib
 运行（根据你的量程配置调整 `--accel-range-g/--gyro-range-dps`）：
 
 ```bash
-python tools/compare_euler_algos.py --port COM7 --baud 115200 --seconds 20 \
-	--accel-range-g 4 --gyro-range-dps 500 --out tools/raw_capture.csv
+python tools/compare_euler_algos.py --port COM7 --baud 115200 --seconds 20 
 ```
 
 脚本会绘制 roll/pitch/yaw 三条对比曲线，并可选保存采集到的 CSV。

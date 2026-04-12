@@ -10,9 +10,9 @@
 #include "nvs_flash.h"
 #include "esp_websocket_client.h"
 
-#include "mpu6050.h"          // 您的 MPU6050 驱动头文件
+#include "mpu6050.h"
 
-// ==================== WiFi 配置 ====================
+// WiFi 配置
 #define WIFI_SSID       "esp_test"
 #define WIFI_PASS       "00008888"
 #define MAX_RETRY       5
@@ -22,7 +22,7 @@ const int WIFI_CONNECTED_BIT = BIT0;
 
 static const char *TAG = "MAIN";
 
-// ==================== WebSocket 配置 ====================
+// WebSocket 配置
 #define WEBSOCKET_URI   "ws://47.108.159.151:3000/esp" 
 
 static esp_websocket_client_handle_t websocket_client;
@@ -32,14 +32,12 @@ static esp_websocket_client_handle_t websocket_client;
 #define SOLVER_HZ               SAMPLE_RATE_HZ
 #define TX_HZ                   20
 
-// ==================== 原始数据 UART 输出（用于 Python 离线/在线解算对比） ====================
-// 为保证“不影响原来的代码逻辑”，默认关闭；需要时把 0 改为 1。
+// 原始数据 UART 输出（用于 Python 解算对比）
+// 输出格式：RAW,t_ms,ax,ay,az,gx,gy,gz（均为 int16 原始值；gyro 已减零偏）
+// 默认关闭；需要时把 0 改为 1。
 #define ENABLE_RAW_UART_STREAM  1
 // 建议不要超过串口带宽；115200 下 100Hz 更稳，必要时可提高串口波特率再改到 200Hz。
 #define RAW_UART_STREAM_HZ      100
-// 输出格式：RAW,t_ms,ax,ay,az,gx,gy,gz（均为 int16 原始值；gyro 已减零偏）
-// 可选附带当前 ESP32 内部解算欧拉角（单位：deg），便于对照。
-#define RAW_UART_INCLUDE_EULER  1
 
 // 全局保存最近一次测得的 ESP->Server 单向延迟 (ms)
 static uint32_t g_ms_one_way = 0;
@@ -47,6 +45,7 @@ static MPU6050_t g_mpu_data;
 static portMUX_TYPE g_mpu_lock = portMUX_INITIALIZER_UNLOCKED;
 
 #if ENABLE_RAW_UART_STREAM
+
 static void raw_uart_stream_task(void *pvParameters){
     (void)pvParameters;
 
@@ -65,26 +64,18 @@ static void raw_uart_stream_task(void *pvParameters){
 
         uint32_t t_ms = (uint32_t)(xTaskGetTickCount() * portTICK_PERIOD_MS);
 
-#if RAW_UART_INCLUDE_EULER
-        // 用 printf 输出，避免 ESP_LOG 前缀干扰 Python 解析
-        printf("RAW,%lu,%d,%d,%d,%d,%d,%d,%.2f,%.2f,%.2f\n",
-               (unsigned long)t_ms,
-               (int)mpu_snapshot.AccX, (int)mpu_snapshot.AccY, (int)mpu_snapshot.AccZ,
-               (int)mpu_snapshot.GyroX, (int)mpu_snapshot.GyroY, (int)mpu_snapshot.GyroZ,
-               mpu_snapshot.roll, mpu_snapshot.pitch, mpu_snapshot.yaw);
-#else
+        // 用 printf 输出，避免 ESP_LOG 前缀干扰解析
         printf("RAW,%lu,%d,%d,%d,%d,%d,%d\n",
                (unsigned long)t_ms,
                (int)mpu_snapshot.AccX, (int)mpu_snapshot.AccY, (int)mpu_snapshot.AccZ,
                (int)mpu_snapshot.GyroX, (int)mpu_snapshot.GyroY, (int)mpu_snapshot.GyroZ);
-#endif
 
         vTaskDelayUntil(&last_wake, interval);
     }
 }
 #endif
 
-// ==================== WiFi 事件处理 ====================
+// WiFi 事件处理 
 static void wifi_event_handler(void *arg, esp_event_base_t event_base,
                                int32_t event_id, void *event_data){
     if (event_base == WIFI_EVENT && event_id == WIFI_EVENT_STA_START) {
@@ -131,7 +122,7 @@ static void wifi_init_sta(void){
     ESP_LOGI(TAG, "WiFi connected");
 }
 
-// ==================== WebSocket 事件处理 ====================
+// WebSocket 事件处理
 static void websocket_event_handler(void *handler_args, esp_event_base_t base,
                                     int32_t event_id, void *event_data){
     esp_websocket_event_data_t *data = (esp_websocket_event_data_t *)event_data;
@@ -159,7 +150,7 @@ static void websocket_event_handler(void *handler_args, esp_event_base_t base,
                 uint32_t ms_rtt    = tick_diff * portTICK_PERIOD_MS;
                 uint32_t ms_one_way = ms_rtt / 2;
 
-                g_ms_one_way = ms_one_way;  // ★ 更新全局延迟
+                g_ms_one_way = ms_one_way;  // 更新全局延迟
 
                 ESP_LOGI("LAT", "ESP->Server RTT=%lu ms, one-way≈%lu ms",
                          (unsigned long)ms_rtt, (unsigned long)ms_one_way);
@@ -183,7 +174,7 @@ static void websocket_init(void){
         .buffer_size = 1024,
         .reconnect_timeout_ms = 5000,
         .network_timeout_ms = 5000,
-        .disable_auto_reconnect = false,   // 启用自动重连
+        .disable_auto_reconnect = false,  // 启用自动重连
     };
     websocket_client = esp_websocket_client_init(&websocket_config);
     ESP_ERROR_CHECK(esp_websocket_register_events(websocket_client,
@@ -191,11 +182,11 @@ static void websocket_init(void){
                                                   websocket_event_handler,
                                                   NULL));
 
-    // ★ 启动 WebSocket 连接
+    // 启动 WebSocket 连接
     ESP_ERROR_CHECK(esp_websocket_client_start(websocket_client));
 }
 
-// ==================== 传感器数据发送任务 ====================
+// 传感器数据发送任务
 static void data_transmission_task(void *pvParameters){
     char json_buffer[200];
     MPU6050_t mpu_snapshot;
@@ -261,7 +252,7 @@ static void attitude_solver_task(void *pvParameters){
     }
 }
 
-// ==================== 延迟测量任务（ESP32 -> 服务器 RTT） ====================
+// 延迟测量任务（ESP32 -> 服务器 RTT）
 static void latency_task(void *pvParameters){
     char buf[64];
     
@@ -287,7 +278,7 @@ static void latency_task(void *pvParameters){
     }
 }
 
-// ==================== 主函数 ====================
+
 void app_main(void){
     // 初始化 NVS
     esp_err_t ret = nvs_flash_init();
@@ -312,7 +303,7 @@ void app_main(void){
     ESP_ERROR_CHECK(mpu6050_init(&mpu_cfg));
     mpu6050_reset_yaw_drift_estimator();
 
-    // 可选：设置当前姿态为零点
+    // 设置当前姿态为零点
     mpu6050_set_angle_zero(&g_mpu_data);
     // 初始化 WebSocket
     websocket_init();
@@ -321,11 +312,10 @@ void app_main(void){
     xTaskCreate(attitude_solver_task, "solver_task", 4096, NULL, 6, NULL);
 
 #if ENABLE_RAW_UART_STREAM
-    // 原始数据输出（供 Python 接收/对比算法），不影响原有 WebSocket 逻辑
+    // 原始数据输出（供 Python 接收/对比算法）
     xTaskCreate(raw_uart_stream_task, "raw_uart", 3072, NULL, 3, NULL);
 #endif
-
-    // 姿态日志输出（含自适应漂移估计）
+    // 姿态日志输出
     //xTaskCreate(attitude_log_task, "att_log", 3072, NULL, 4, NULL);
     // 创建数据传输任务
     xTaskCreate(data_transmission_task, "data_task", 4096, NULL, 5, NULL);
