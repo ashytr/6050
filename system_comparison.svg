@@ -1,0 +1,60 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="600" viewBox="0 0 1200 600">
+  <defs>
+    <marker id="arrow" markerWidth="10" markerHeight="10" refX="6" refY="3" orient="auto">
+      <path d="M0,0 L6,3 L0,6 Z" fill="#333333" />
+    </marker>
+  </defs>
+  <rect width="1200" height="600" fill="#ffffff" />
+  <line x1="600" y1="40" x2="600" y2="560" stroke="#d0d0d0" stroke-width="2" stroke-dasharray="6 6" />
+
+  <g font-family="Arial, 'Noto Sans SC', sans-serif" fill="#222222">
+    <text x="300" y="60" text-anchor="middle" font-size="24" font-weight="bold">传统有线姿态测量系统</text>
+    <rect x="110" y="160" width="160" height="80" rx="8" ry="8" fill="#f5f5f5" stroke="#555555" />
+    <text x="190" y="205" text-anchor="middle" font-size="18">传感器</text>
+
+    <rect x="330" y="150" width="190" height="110" rx="10" ry="10" fill="#f5f5f5" stroke="#555555" />
+    <text x="425" y="205" text-anchor="middle" font-size="18">单台PC</text>
+
+    <line x1="270" y1="200" x2="330" y2="200" stroke="#333333" stroke-width="2" marker-end="url(#arrow)" />
+    <text x="300" y="185" text-anchor="middle" font-size="14" fill="#555555">USB/串口线</text>
+
+    <text x="300" y="330" text-anchor="middle" font-size="18" fill="#444444">部署受限</text>
+    <text x="300" y="360" text-anchor="middle" font-size="18" fill="#444444">交互单一</text>
+  </g>
+
+  <g font-family="Arial, 'Noto Sans SC', sans-serif" fill="#222222">
+    <text x="900" y="60" text-anchor="middle" font-size="24" font-weight="bold">本文无线多终端方案</text>
+
+    <rect x="650" y="160" width="190" height="80" rx="8" ry="8" fill="#f5f5f5" stroke="#555555" />
+    <text x="745" y="205" text-anchor="middle" font-size="16">ESP32+MPU6050</text>
+
+    <rect x="900" y="140" width="200" height="110" rx="20" ry="20" fill="#e8f0fe" stroke="#4a7bd0" />
+    <text x="1000" y="200" text-anchor="middle" font-size="18" fill="#2b5ea8">云服务器</text>
+
+    <line x1="840" y1="200" x2="900" y2="200" stroke="#333333" stroke-width="2" stroke-dasharray="6 6" marker-end="url(#arrow)" />
+    <text x="870" y="185" text-anchor="middle" font-size="14" fill="#555555">WiFi</text>
+
+    <rect x="660" y="330" width="160" height="70" rx="8" ry="8" fill="#f5f5f5" stroke="#555555" />
+    <text x="740" y="372" text-anchor="middle" font-size="16">桌面端</text>
+
+    <rect x="840" y="330" width="160" height="70" rx="8" ry="8" fill="#f5f5f5" stroke="#555555" />
+    <text x="920" y="372" text-anchor="middle" font-size="16">浏览器</text>
+
+    <rect x="1020" y="330" width="140" height="70" rx="8" ry="8" fill="#f5f5f5" stroke="#555555" />
+    <text x="1090" y="372" text-anchor="middle" font-size="16">移动端</text>
+
+    <line x1="1000" y1="250" x2="740" y2="330" stroke="#333333" stroke-width="2" marker-end="url(#arrow)" />
+    <line x1="1000" y1="250" x2="920" y2="330" stroke="#333333" stroke-width="2" marker-end="url(#arrow)" />
+    <line x1="1000" y1="250" x2="1090" y2="330" stroke="#333333" stroke-width="2" marker-end="url(#arrow)" />
+
+    <rect x="700" y="440" width="120" height="40" rx="20" ry="20" fill="#e8f5e9" stroke="#66bb6a" />
+    <text x="760" y="466" text-anchor="middle" font-size="16" fill="#2e7d32">无线化</text>
+
+    <rect x="840" y="440" width="120" height="40" rx="20" ry="20" fill="#e3f2fd" stroke="#64b5f6" />
+    <text x="900" y="466" text-anchor="middle" font-size="16" fill="#1565c0">多终端</text>
+
+    <rect x="980" y="440" width="120" height="40" rx="20" ry="20" fill="#fff3e0" stroke="#ffb74d" />
+    <text x="1040" y="466" text-anchor="middle" font-size="16" fill="#ef6c00">远程化</text>
+  </g>
+</svg>

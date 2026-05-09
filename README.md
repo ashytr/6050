@@ -8,6 +8,10 @@
 - 通过 WebSocket 周期发送姿态数据到服务器
 - 定时发送 `ping` 并估算单向链路延迟 `lat_es`
 
+## 方案对比图
+
+![传统有线与无线多终端方案对比](./system_comparison.svg)
+
 ## 目录结构
 
 ```text
