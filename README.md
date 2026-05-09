@@ -10,7 +10,7 @@
 
 ## 方案对比图
 
-![传统有线姿态测量系统与本文无线多终端方案对比](./system_comparison.svg)
+![有线姿态测量与无线多终端方案对比图](./system_comparison.svg)
 
 ## 目录结构
 
