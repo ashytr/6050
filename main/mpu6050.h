@@ -1,5 +1,13 @@
-#ifndef _MPU6050_h_
-#define _MPU6050_h_
+/**
+ * @file    mpu6050.h
+ * @brief   MPU6050 六轴 IMU 驱动 —— 寄存器映射、数据类型与公开 API。
+ *
+ * 本头文件定义了 I2C 配置、用到的全部 MPU6050 寄存器、传感器数据结构、
+ * 量程/滤波枚举以及公开函数声明。对应的 mpu6050.c 实现了驱动、校准
+ * 和两种姿态估计算法（互补滤波 与 Mahony AHRS）。
+ */
+#ifndef MPU6050_H_
+#define MPU6050_H_
 
 #include "driver/i2c_master.h"
 #include "freertos/FreeRTOS.h"
@@ -92,15 +100,30 @@ typedef struct {
     bool use_interrupt;                 // 是否使用中断
 } mpu6050_config_t;
 
-// 函数声明
+// ---- 公开 API ---------------------------------------------------------
 esp_err_t mpu6050_init(const mpu6050_config_t *config);
-void mpu6050_get_angle(MPU6050_t *data);        // 基础互补滤波
-void mpu6050_get_angle_plus(MPU6050_t *data);   // 四元数+自适应滤波
+
+// 基础互补滤波（陀螺仪积分 + 加速度计重力修正）。
+// 实现简单，但 yaw 会无限漂移。保留作为备用/演示。
+void mpu6050_get_angle(MPU6050_t *data);
+
+// Mahony AHRS —— 基于四元数的传感器融合，带 PI 校正和自适应增益。
+// 这是生产环境下使用的主要姿态解算器。
+// 通过静止时估计陀螺仪零偏来减缓 yaw 漂移。
+void mpu6050_get_angle_plus(MPU6050_t *data);
+
+// 双阶段静止校准：将当前姿态捕获为新的"零点"参考，
+// 使后续输出的角度接近 (0, 0, 0)。
 void mpu6050_set_angle_zero(MPU6050_t *data);
 uint8_t mpu6050_read_id(void);
 float mpu6050_get_temp(MPU6050_t *data);
 float mpu6050_get_yaw_drift_rate_dps(void);
 void mpu6050_reset_yaw_drift_estimator(void);
+
+// I2C 看门狗 —— 供外部监控任务调用，检测并恢复 I2C 总线卡死
+bool mpu6050_i2c_heartbeat_ok(void);
+bool mpu6050_i2c_is_stuck(void);
+void mpu6050_i2c_force_recover(void);
 
 // 内部使用的滤波器（简化版PT1）
 #if MPU6050_USE_FILTER
@@ -114,4 +137,4 @@ void pt1_filter_init(pt1_filter_t *filter, float cutoff_hz, float sample_rate_hz
 float pt1_filter_apply(pt1_filter_t *filter, float input);
 #endif
 
-#endif // MPU6050
+#endif // MPU6050_H_

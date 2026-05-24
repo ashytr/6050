@@ -1,34 +1,50 @@
+/**
+ * @file    mpu6050.c
+ * @brief   MPU6050 驱动：I2C 通信、校准、以及两种姿态估计算法
+ *         （互补滤波 & Mahony AHRS）。
+ *
+ * 架构概览
+ * ========
+ * 1. I2C HAL 层      —— 总线初始化、寄存器读写、连续读取
+ * 2. 校准             —— 静止状态下陀螺仪零偏估计（带重试）
+ * 3. 数据采集         —— 连续读取 14 字节，减去零偏，可选 PT1 滤波
+ * 4. 姿态解算         —— get_angle（互补滤波）和 get_angle_plus（Mahony）
+ * 5. 零点参考         —— 双阶段静止校准，用于姿态归零
+ *
+ * 所有驱动状态均为文件作用域 static —— 不对外部可见。
+ */
 #include "mpu6050.h"
 
 static const char *TAG = "MPU6050";
 
-// I2C总线和设备句柄
+// ---- I2C 总线与设备句柄 --------------------------------------------------
 static i2c_master_bus_handle_t i2c_bus_handle = NULL;
 static i2c_master_dev_handle_t mpu6050_dev_handle = NULL;
 
-// 内部状态
-static float mpu6050_dt = 0.005f;   // 默认200Hz -> 5ms
-static float gyro_scale = 0.0f;     // 弧度/LSB
-static float accel_scale = 0.0f;    // g/LSB
+// ---- 内部状态 ------------------------------------------------------------
+static float mpu6050_dt = 0.005f;   // 默认 200 Hz → 5 ms
+static float gyro_scale = 0.0f;     // 弧度/秒 每 LSB
+static float accel_scale = 0.0f;    // g 每 LSB
 static bool mpu6050_inited = false;
 
-// 零点校准值
+// ---- 陀螺仪零偏校准值 ----------------------------------------------------
 static int16_t gyro_zero_x = 0, gyro_zero_y = 0, gyro_zero_z = 0;
 
-// 角度偏移（用于归零）
+// ---- 欧拉角偏移（由零点参考校准设置）-------------------------------------
 static float angle_yaw_offset = 0;
 static float angle_roll_offset = 0;
 static float angle_pitch_offset = 0;
-static float yaw_drift_rate_dps = 0.0f;
+static float yaw_drift_rate_dps = 0.0f;  // 估计的陀螺仪 Z 轴漂移 (deg/s)
 
-// 四元数零点（用于让发送到服务端的姿态也归零）
-// 输出姿态 q_out = q_zero_inv ⊗ q_internal
+// ---- 四元数零点参考 ------------------------------------------------------
+// 启用后，输出四元数 = q_zero_inv ⊗ q_internal，
+// 使得"零点"姿态映射到单位四元数。
 static float quat_zero_inv0 = 1.0f;
 static float quat_zero_inv1 = 0.0f;
 static float quat_zero_inv2 = 0.0f;
 static float quat_zero_inv3 = 0.0f;
 static bool quat_zero_enabled = false;
-static uint32_t quat_zero_generation = 0;
+static uint32_t quat_zero_generation = 0;  // 每次归零递增；用于重置 yaw 解包裹
 
 #if MPU6050_USE_FILTER
 static pt1_filter_t pt1_acc_x, pt1_acc_y, pt1_acc_z;
@@ -38,14 +54,18 @@ static pt1_filter_t pt1_gyro_x, pt1_gyro_y, pt1_gyro_z;
 // 延时函数（毫秒）
 #define mpu6050_delay_ms(ms) vTaskDelay(pdMS_TO_TICKS(ms))
 
-// 快速平方根倒数
+// 快速平方根倒数 —— 经典的 Quake III 算法 (0x5f3759df)。
+// 通过对浮点数的整数位层面进行巧妙的初始猜测，再用一次 Newton-Raphson
+// 迭代逼近 1/sqrt(x)。ESP32-C3 没有硬件 FPU，用此算法做四元数归一化
+// 相比 1.0f/sqrtf(x) 约有 3 倍加速，代价是极小的精度损失。
 static inline float inv_sqrt(float x)
 {
     float halfx = 0.5f * x;
     float y = x;
-    int32_t i = *(int32_t *)&y;
-    i = 0x5f3759df - (i >> 1);
-    y = *(float *)&i;
+    union { float f; int32_t i; } u;
+    u.f = y;
+    u.i = 0x5f3759df - (u.i >> 1);
+    y = u.f;
     y = y * (1.5f - (halfx * y * y));
     return y;
 }
@@ -100,6 +120,17 @@ static esp_err_t mpu6050_read_reg_burst(uint8_t reg, uint8_t len, uint8_t *data)
 {
     return i2c_master_transmit_receive(mpu6050_dev_handle, &reg, 1, data, len,
                                        MPU6050_I2C_TIMEOUT_MS);
+}
+
+// I2C 总线恢复 —— 当 MPU6050 拉死 SDA 导致总线持续 busy 时，
+// 由看门狗任务（优先级 7）抢占调用。仅调用 i2c_master_bus_reset()
+// 复位硬件 FSM（含 GPIO 位脉冲清除 stuck bus），不操作 device handle，
+// 否则会因 solver_task 持有 bus_lock_mux 导致死锁。
+static void mpu6050_i2c_recover(void)
+{
+    ESP_LOGW(TAG, "I2C stuck, resetting controller FSM...");
+    i2c_master_bus_reset(i2c_bus_handle);
+    ESP_LOGI(TAG, "I2C FSM reset complete");
 }
 
 #if MPU6050_USE_FILTER
@@ -244,7 +275,8 @@ esp_err_t mpu6050_init(const mpu6050_config_t *config)
         case acc_16g: accel_scale = 16.0f / 32768.0f; break;
     }
 
-    // 复位设备
+    // ---- 设备复位与唤醒序列 -----------------------------------------------
+    // 复位设备，等待 100 ms，唤醒并将时钟源设为 X 轴陀螺仪 PLL。
     ret = mpu6050_write_reg(MPU6050_PWR_MGMT_1, 0x80);
     if (ret != ESP_OK) goto init_fail;
     mpu6050_delay_ms(100);
@@ -319,7 +351,11 @@ esp_err_t mpu6050_init(const mpu6050_config_t *config)
     }
 
 #if MPU6050_USE_FILTER
-    // 初始化滤波器
+    // 软件 PT1（单极点 IIR）低通滤波器。
+    // 加速度计截止频率 = 48 Hz —— 抑制振动噪声，同时保留
+    //                             人体运动带宽（< 20 Hz）。
+    // 陀螺仪截止频率   = 88 Hz —— 更高带宽以保持角速度响应；
+    //                             陀螺仪本身噪声较低。
     pt1_filter_init(&pt1_acc_x, 48, config->sample_rate_hz);
     pt1_filter_init(&pt1_acc_y, 48, config->sample_rate_hz);
     pt1_filter_init(&pt1_acc_z, 48, config->sample_rate_hz);
@@ -341,14 +377,55 @@ init_fail:
     return ret;
 }
 
+// I2C 心跳计数器 —— 在每次 I2C 读取前递增。
+// 由独立看门狗任务监控；若计数器停止变化，说明 solver_task
+// 已陷入 I2C 驱动层死循环，需要外部介入复位总线。
+static volatile uint32_t i2c_heartbeat = 0;
+static uint32_t i2c_heartbeat_last = 0;
+static uint32_t i2c_stuck_count = 0;
+
+bool mpu6050_i2c_heartbeat_ok(void)
+{
+    bool ok = (i2c_heartbeat != i2c_heartbeat_last);
+    i2c_heartbeat_last = i2c_heartbeat;
+    if (!ok) {
+        i2c_stuck_count++;
+    } else {
+        i2c_stuck_count = 0;
+    }
+    return ok;
+}
+
+bool mpu6050_i2c_is_stuck(void)
+{
+    return i2c_stuck_count >= 3;  // 连续 3 次检查无变化 → 确认卡死
+}
+
+void mpu6050_i2c_force_recover(void)
+{
+    mpu6050_i2c_recover();
+    i2c_stuck_count = 0;
+    i2c_heartbeat_last = i2c_heartbeat;
+}
+
 // 读取原始数据
 static esp_err_t mpu6050_get_raw(MPU6050_t *data)
 {
+    static int i2c_fail_count = 0;
     uint8_t buf[14];
-    
-    if (mpu6050_read_reg_burst(MPU6050_ACCEL_XOUT_H, 14, buf) != ESP_OK) {
+
+    i2c_heartbeat++;  // 先打心跳再读，若读操作卡死则心跳停止
+
+    esp_err_t ret = mpu6050_read_reg_burst(MPU6050_ACCEL_XOUT_H, 14, buf);
+    if (ret != ESP_OK) {
+        i2c_fail_count++;
+        if (i2c_fail_count >= 5) {
+            mpu6050_i2c_recover();
+            i2c_fail_count = 0;
+        }
         return ESP_FAIL;
     }
+    i2c_fail_count = 0;
 
     // 解析数据（大端序）
     data->AccX = (int16_t)((buf[0] << 8) | buf[1]);
@@ -364,18 +441,18 @@ static esp_err_t mpu6050_get_raw(MPU6050_t *data)
     data->GyroY -= gyro_zero_y;
     data->GyroZ -= gyro_zero_z;
 
-#if MPU6050_USE_FILTER
-    data->AccX = (int16_t)pt1_filter_apply(&pt1_acc_x, (float)data->AccX);
-    data->AccY = (int16_t)pt1_filter_apply(&pt1_acc_y, (float)data->AccY);
-    data->AccZ = (int16_t)pt1_filter_apply(&pt1_acc_z, (float)data->AccZ);
-    data->GyroX = (int16_t)pt1_filter_apply(&pt1_gyro_x, (float)data->GyroX);
-    data->GyroY = (int16_t)pt1_filter_apply(&pt1_gyro_y, (float)data->GyroY);
-    data->GyroZ = (int16_t)pt1_filter_apply(&pt1_gyro_z, (float)data->GyroZ);
-#endif
     return ESP_OK;
 }
 
-// 基础互补滤波
+// =========================================================================
+// 基础互补滤波（陀螺仪积分 + 加速度计校正）。
+// - Roll/Pitch：陀螺仪积分与加速度计角度的加权融合。
+// - Yaw：纯陀螺仪积分（无磁力计 → 随时间无限漂移）。
+// - gyro_weight 在 0.98（正常）和 0.95（大幅加速度）之间自适应，
+//   使滤波器在设备被晃动时更少信任陀螺仪。
+//
+// 此函数为备用/演示；主要解算器是 get_angle_plus。
+// =========================================================================
 void mpu6050_get_angle(MPU6050_t *data)
 {
     static float gyro_roll = 0.0f, gyro_pitch = 0.0f;
@@ -431,7 +508,35 @@ void mpu6050_get_angle(MPU6050_t *data)
     data->yaw -= angle_yaw_offset;
 }
 
-// 四元数+自适应滤波
+// =========================================================================
+// Mahony AHRS —— 基于四元数的姿态估计器，带 PI 校正。
+//
+// 算法（仅 IMU，无磁力计）：
+//   1. 读取原始加速度+陀螺仪数据，转换为物理单位（g 和 rad/s）。
+//   2. 归一化加速度向量 → 作为重力方向的估计。
+//   3. 用当前四元数推算出预测的重力方向向量。
+//   4. 实测重力与预测重力的叉积误差馈入 PI 控制器，校正陀螺仪角速度。
+//   5. 通过四元数微分方程 q̇ = ½ q ⊗ ω 积分四元数。
+//   6. 归一化四元数，防止数值积分漂移。
+//
+// 关键设计决策
+// -----------
+// - 自适应 PI 增益：
+//     前 400 次迭代：kp=8.0, ki=0.002 （激进收敛）
+//     稳态，加速度有效*：kp=4.8, ki=0.0015
+//     稳态，加速度无效：kp=3.6, ki=0.001 （更依赖陀螺仪）
+//     * "有效" = 加速度幅值在 [0.8g, 1.2g] 区间（接近自由落体/静止）
+// - Yaw 漂移估计：
+//     当静止超过 1 秒（|accel|≈1g 且 三个陀螺轴均 < 0.10 rad/s），
+//     用 EWMA（α=0.005）估计陀螺仪 Z 轴残余零偏并扣除。
+//     无需磁力计即可减少静止期间的 yaw 漂移。
+// - 四元数零点参考（q_zero_inv）：
+//     输出四元数通过存储的共轭进行旋转，使零点姿态映射到单位四元数。
+//     世代计数器用于检测归零事件并重置 yaw 解包裹状态，避免跳变。
+// - Yaw 解包裹：
+//     追踪 ±180° 的跳变增量，产生连续（不跳变）的 yaw 值，
+//     适用于累积旋转显示场景。
+// =========================================================================
 void mpu6050_get_angle_plus(MPU6050_t *data)
 {
     static float q0 = 1.0f, q1 = 0.0f, q2 = 0.0f, q3 = 0.0f;
@@ -475,17 +580,28 @@ void mpu6050_get_angle_plus(MPU6050_t *data)
     float gz = data->GyroZ * gyro_scale;
     float gz_dps_raw = gz * (180.0f / M_PI);
 
+#if MPU6050_USE_FILTER
+    // PT1 低通滤波 —— 在物理单位 (g, rad/s) 上运行，保持 float 精度
+    ax = pt1_filter_apply(&pt1_acc_x, ax);
+    ay = pt1_filter_apply(&pt1_acc_y, ay);
+    az = pt1_filter_apply(&pt1_acc_z, az);
+    gx = pt1_filter_apply(&pt1_gyro_x, gx);
+    gy = pt1_filter_apply(&pt1_gyro_y, gy);
+    gz = pt1_filter_apply(&pt1_gyro_z, gz);
+#endif
+
     float acc_mag_sq = ax*ax + ay*ay + az*az;
 
-    // 动态增益调整
+    // 自适应 PI 增益 —— 初始收敛阶段使用高增益，进入稳态后降低
+    // 以避免超调和振荡。0.64 ≈ 0.8², 1.44 ≈ 1.2² → 加速度幅值在 [0.8g, 1.2g]。
     float kp, ki;
     if (init_cnt < 400) {
         init_cnt++;
-        kp = 8.0f;
+        kp = 8.0f;      // 高比例增益，快速初始锁定
         ki = 0.002f;
     } else {
         bool acc_valid = (acc_mag_sq > 0.64f && acc_mag_sq < 1.44f);
-        kp = acc_valid ? 4.8f : 3.6f;
+        kp = acc_valid ? 4.8f : 3.6f;      // 加速度不可靠时降低增益
         ki = acc_valid ? 0.0015f : 0.001f;
     }
 
@@ -518,6 +634,10 @@ void mpu6050_get_angle_plus(MPU6050_t *data)
         gy += kp * ey;
     }
 
+    // 静止检测，用于 yaw 漂移估计。
+    // 静止条件 = 加速度接近 1g（0.90²..1.10²）且 三个陀螺轴均 < 0.10 rad/s（≈5.7 deg/s）。
+    // 静止超过 1 秒后，EWMA（α = 0.005）追踪陀螺仪 Z 轴残余零偏。
+    // 使用慢速 α 确保只捕获真正的直流偏置，而非瞬时运动。
     bool is_still = (acc_mag_sq > 0.90f && acc_mag_sq < 1.10f &&
                      fabsf(gx) < 0.10f && fabsf(gy) < 0.10f && fabsf(gz) < 0.10f);
     if (is_still) {
@@ -593,14 +713,31 @@ void mpu6050_get_angle_plus(MPU6050_t *data)
     data->yaw -= angle_yaw_offset;
 }
 
+// =========================================================================
+// 双阶段静止零点参考校准。
+//
+// 第一阶段 —— 粗对齐：
+//   - 250 ms "预热"，让 Mahony 滤波器在启动后收敛。
+//   - 等待静止采样点（|accel|≈1g，所有陀螺轴 < 5 deg/s）。
+//   - 对最多 20 个采样点的原始欧拉角和四元数取平均。
+//   - 计算 q_zero_inv = 平均四元数的共轭。
+//
+// 第二阶段 —— 残差微调：
+//   - 在 q_zero_inv 已生效的情况下，再采集最多 10 个静止采样点。
+//     此时的残余角度纯粹是测量噪声/校准误差 —— 设置 roll/pitch/yaw
+//     的精细偏移使其精确归零。
+//
+// 双阶段方法比单次平均收敛得更快，因为第二阶段在已经旋转过的
+// 坐标系中运行，残余误差较小且呈线性。
+// =========================================================================
 void mpu6050_set_angle_zero(MPU6050_t *data)
 {
-    const int preheat_iters = 25;        // 25 * 10ms = 250ms 预热
-    const int sample_count = 20;
-    const int max_attempts = 120;
-    const float acc_min = 0.90f;
-    const float acc_max = 1.10f;
-    const float gyro_max_dps = 5.0f;
+    const int preheat_iters = 25;        // 25 × 10 ms = 250 ms 预热
+    const int sample_count = 20;         // 第一阶段静止采样数
+    const int max_attempts = 120;        // 超时 = 120 × 10 ms = 1.2 s
+    const float acc_min = 0.90f;         // "静止"的最小加速度幅值 (g)
+    const float acc_max = 1.10f;         // "静止"的最大加速度幅值 (g)
+    const float gyro_max_dps = 5.0f;     // "静止"的最大陀螺仪角速度 (deg/s)
 
     float sum_roll = 0.0f;
     float sum_pitch = 0.0f;
@@ -757,12 +894,7 @@ void mpu6050_set_angle_zero(MPU6050_t *data)
         }
     }
 
-    // 恢复原先是否启用零点（本轮需求是启动时归零后保持启用；这里保留兼容性）
-    if (!prev_quat_zero_enabled) {
-        // 启动归零：保持启用
-    } else {
-        // 运行中二次归零：也保持启用
-    }
+    (void)prev_quat_zero_enabled;  // 无论之前状态如何，归零后均保持启用
 
     mpu6050_reset_yaw_drift_estimator();
 
@@ -779,9 +911,7 @@ uint8_t mpu6050_read_id(void)
 
 float mpu6050_get_temp(MPU6050_t *data)
 {
-    if (mpu6050_get_raw(data) != ESP_OK) {
-        return data->temp;
-    }
+    // rawTemp 已在 get_angle_plus 调用链的 get_raw 中填充，无需额外 I2C 读取
     data->temp = (float)data->rawTemp / 340.0f + 36.53f;
     return data->temp;
 }
